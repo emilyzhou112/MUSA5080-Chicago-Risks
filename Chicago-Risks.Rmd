@@ -1,0 +1,1137 @@
+---
+title: "Geospatial Risk Predictions of Robbery Incidents in Chicago"
+author: "Emily Zhou"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    theme: simplex
+    toc: yes
+    toc_float: yes
+    code_folding: hide
+    code_download: yes
+editor_options:
+  markdown:
+    wrap: sentence
+---
+
+Version 1.0 \| First Created Oct 3, 2023 \| Updated Oct 11, 2023
+
+Keywords: Ordinary Least Square Regression, Spatial Auto-correlation, Moran's I, Monte Carlo Simulation, Getis-Ord Gi*, K-fold Cross Validation, K Nearest Neighbors
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r load libraries, include=FALSE}
+
+library(tidyverse)
+library(sf)
+library(RSocrata)
+library(viridis)
+library(spatstat.explore)
+library(raster)
+library(spdep)
+library(FNN)
+library(grid)
+library(gridExtra)
+library(knitr)
+library(kableExtra)
+library(tidycensus)
+library(classInt)   # for KDE and ML risk class intervals
+library(svDialogs)
+library(patchwork)
+
+# functions
+root.dir = "https://raw.githubusercontent.com/urbanSpatial/Public-Policy-Analytics-Landing/master/DATA/"
+source("https://raw.githubusercontent.com/urbanSpatial/Public-Policy-Analytics-Landing/master/functions.r")
+
+```
+
+
+# Introduction
+
+```{r load outcome variable, warning=FALSE, message=FALSE}
+
+chicagoBoundary <- 
+  st_read(file.path(root.dir,"/Chapter5/chicagoBoundary.geojson")) %>%
+  st_transform('ESRI:102271') 
+
+robbery21 <- 
+  read.socrata("https://data.cityofchicago.org/Public-Safety/Crimes-2021/dwme-t96c") %>% 
+    filter(Primary.Type == "ROBBERY") %>%
+    mutate(x = gsub("[()]", "", Location)) %>%
+    separate(x,into= c("Y","X"), sep=",") %>%
+    mutate(X = as.numeric(X),Y = as.numeric(Y)) %>% 
+    na.omit() %>%
+    st_as_sf(coords = c("X", "Y"), crs = 4326, agr = "constant")%>%
+    st_transform('ESRI:102271') %>% 
+    distinct()
+```
+
+
+```{r robbery locations}
+
+ggplot() + 
+  geom_sf(data = chicagoBoundary, fill = "black") +
+  geom_sf(data = robbery21, colour="#BB3754", size=0.1, show.legend = "point") +
+  labs(title= "Robbery Incidents in Chicago 2021") + 
+  theme(axis.text.x=element_blank(),
+        axis.text.y=element_blank(),
+        axis.ticks =element_blank(),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        plot.subtitle = element_text(size = 9,face = "italic"),
+        plot.title = element_text(size = 12, face = "bold"),
+        panel.background = element_blank(),
+        panel.border = element_rect(colour = "grey", fill=NA, size=0.8)
+        )
+
+```
+
+```{r robbery density}
+options(scipen=0)
+ggplot() + 
+  geom_sf(data = chicagoBoundary, fill = "black") +
+  stat_density2d(data = data.frame(st_coordinates(robbery21)), 
+                 aes(X, Y, fill = ..level.., alpha = ..level..),
+                 size = 0.01, bins = 60, geom = 'polygon') +
+  scale_fill_viridis(option = "magma", name = "Density") +
+  scale_alpha(range = c(0.00, 0.35), guide = FALSE) +
+  labs(title = "Density of Robbery") +
+  theme(axis.text.x=element_blank(),
+        axis.text.y=element_blank(),
+        axis.ticks =element_blank(),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        plot.subtitle = element_text(size = 9,face = "italic"),
+        plot.title = element_text(size = 12, face = "bold"),
+        panel.background = element_blank(),
+        panel.border = element_rect(colour = "grey", fill=NA, size=0.8)
+        )
+```
+
+
+
+
+```{r create fishnet}
+fishnet <- 
+  st_make_grid(chicagoBoundary,
+               cellsize = 500, 
+               square = TRUE) %>%
+  .[chicagoBoundary] %>%            # fast way to select intersecting polygons
+  st_sf() %>%
+  mutate(uniqueID = 1:n())
+
+ggplot() +
+  geom_sf(data=fishnet, color="black", fill="#FFF5EE") +
+  labs(title = "Fishnet of Chicago") +
+  theme(axis.text.x=element_blank(),
+        axis.text.y=element_blank(),
+        axis.ticks =element_blank(),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        plot.subtitle = element_text(size = 9,face = "italic"),
+        plot.title = element_text(size = 12, face = "bold"),
+        panel.background = element_blank(),
+        panel.border = element_rect(colour = "grey", fill=NA, size=0.8)
+        )
+```
+
+
+
+```{r join robbery to fishnet}
+
+robbery21_net <- 
+  dplyr::select(robbery21) %>% 
+  mutate(countRobbery = 1) %>% 
+  aggregate(., fishnet, sum) %>%
+  mutate(countRobbery = replace_na(countRobbery, 0),
+         uniqueID = 1:n(),
+         cvID = sample(round(nrow(fishnet) / 24), 
+                       size=nrow(fishnet), replace = TRUE))
+
+ggplot() +
+  geom_sf(data = robbery21_net, aes(fill = countRobbery), color = NA) +
+  scale_fill_viridis(option = "magma", name = "Robbery Counts") +
+  labs(title = "Count of Robberies for the Fishnet") +
+  theme(axis.text.x=element_blank(),
+        axis.text.y=element_blank(),
+        axis.ticks =element_blank(),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        plot.subtitle = element_text(size = 9,face = "italic"),
+        plot.title = element_text(size = 12, face = "bold"),
+        panel.background = element_blank(),
+        panel.border = element_rect(colour = "grey", fill=NA, size=0.8)
+        )
+```
+
+
+```{r load predictor variables, warning=FALSE, message=FALSE}
+abandonCars <- 
+  read.socrata("https://data.cityofchicago.org/Service-Requests/311-Service-Requests-Abandoned-Vehicles/3c9v-pnva") %>%
+    mutate(year = substr(creation_date,1,4)) %>% filter(year == "2020") %>%
+    dplyr::select(Y = latitude, X = longitude) %>%
+    na.omit() %>%
+    st_as_sf(coords = c("X", "Y"), crs = 4326, agr = "constant") %>%
+    st_transform(st_crs(fishnet)) %>%
+    mutate(Legend = "Abandoned_Cars")
+  
+abandonBuildings <- 
+  read.socrata("https://data.cityofchicago.org/Service-Requests/311-Service-Requests-Vacant-and-Abandoned-Building/7nii-7srd") %>%
+    mutate(year = substr(date_service_request_was_received,1,4)) %>%  filter(year == "2018") %>%
+    dplyr::select(Y = latitude, X = longitude) %>%
+    na.omit() %>%
+    st_as_sf(coords = c("X", "Y"), crs = 4326, agr = "constant") %>%
+    st_transform(st_crs(fishnet)) %>%
+    mutate(Legend = "Abandoned_Buildings")
+
+graffiti <- 
+  read.socrata("https://data.cityofchicago.org/Service-Requests/311-Service-Requests-Graffiti-Removal-Historical/hec5-y4x5") %>%
+    mutate(year = substr(creation_date,1,4)) %>% filter(year == "2018") %>%
+    filter(where_is_the_graffiti_located_ %in% c("Front", "Rear", "Side")) %>%
+    dplyr::select(Y = latitude, X = longitude) %>%
+    na.omit() %>%
+    st_as_sf(coords = c("X", "Y"), crs = 4326, agr = "constant") %>%
+    st_transform(st_crs(fishnet)) %>%
+    mutate(Legend = "Graffiti")
+
+streetLightsOut <- 
+  read.socrata("https://data.cityofchicago.org/Service-Requests/311-Service-Requests-Street-Lights-All-Out/zuxi-7xem") %>%
+    mutate(year = substr(creation_date,1,4)) %>% filter(year == "2018") %>%
+    dplyr::select(Y = latitude, X = longitude) %>%
+    na.omit() %>%
+    st_as_sf(coords = c("X", "Y"), crs = 4326, agr = "constant") %>%
+    st_transform(st_crs(fishnet)) %>%
+    mutate(Legend = "Street_Lights_Out")
+
+sanitation <-
+  read.socrata("https://data.cityofchicago.org/Service-Requests/311-Service-Requests-Sanitation-Code-Complaints-Hi/me59-5fac") %>%
+    mutate(year = substr(creation_date,1,4)) %>% filter(year == "2018") %>%
+    dplyr::select(Y = latitude, X = longitude) %>%
+    na.omit() %>%
+    st_as_sf(coords = c("X", "Y"), crs = 4326, agr = "constant") %>%
+    st_transform(st_crs(fishnet)) %>%
+    mutate(Legend = "Sanitation")
+
+liquorRetail <- 
+  read.socrata("https://data.cityofchicago.org/resource/nrmj-3kcf.json") %>%  
+    filter(business_activity == "Retail Sales of Packaged Liquor") %>%
+    dplyr::select(Y = latitude, X = longitude) %>%
+    na.omit() %>%
+    st_as_sf(coords = c("X", "Y"), crs = 4326, agr = "constant") %>%
+    st_transform(st_crs(fishnet)) %>%
+    mutate(Legend = "Liquor_Retail")
+
+
+shotSpotter <- 
+  read.socrata("https://data.cityofchicago.org/Public-Safety/Violence-Reduction-Shotspotter-Alerts/3h7q-7mdb") %>%  
+    dplyr::select(Y = latitude, X = longitude) %>%
+    na.omit() %>%
+    st_as_sf(coords = c("X", "Y"), crs = 4326, agr = "constant") %>%
+    st_transform(st_crs(fishnet)) %>%
+    mutate(Legend = "Shot_Spotter")
+
+Banks <- 
+  read.socrata("https://data.cityofchicago.org/Administration-Finance/Lending-Equity-Depository-Locations-2021/jgup-zt7k") %>%  
+  dplyr::select(location) %>%
+  na.omit()
+Banks <- Banks %>%   
+  mutate(X = as.numeric(sub("POINT \\((-?\\d+\\.\\d+) \\d+\\.\\d+\\)", "\\1", Banks$location)),
+         Y = as.numeric(sub("POINT \\(-?\\d+\\.\\d+ (-?\\d+\\.\\d+)\\)", "\\1", Banks$location))) %>%
+  dplyr::select(-location) %>% 
+  filter(!is.na(X) & !is.na(Y)) %>% 
+  st_as_sf(coords = c("X", "Y"), crs = 4326, agr = "constant") %>%
+    st_transform(st_crs(fishnet)) %>%
+    mutate(Legend = "Bank") 
+  
+
+```
+
+
+
+```{r join predictor variables to fishnet, warning=FALSE, message=FALSE}
+
+vars_net <- 
+  rbind(abandonCars,streetLightsOut,abandonBuildings,
+        liquorRetail, graffiti, sanitation, shotSpotter, Banks) %>%
+  st_join(., fishnet, join=st_within) %>%
+  st_drop_geometry() %>%
+  group_by(uniqueID, Legend) %>%
+  summarize(count = n()) %>%
+    full_join(fishnet) %>%
+    spread(Legend, count, fill=0) %>%
+    st_sf() %>%
+    dplyr::select(-`<NA>`) %>%
+    na.omit() %>%
+    ungroup()
+
+```
+
+
+
+```{r visualize predictor variables, fig.height=8, fig.width=11}
+vars_net.long <- 
+  gather(vars_net, Variable, value, -geometry, -uniqueID)
+
+plot1 <- ggplot() +
+  geom_sf(data = vars_net.long %>% filter(Variable == "Abandoned_Buildings"), aes(fill=value), colour=NA) +
+  scale_fill_viridis(option = "magma") + 
+  labs(title = "Abandoned Buildings") +
+  theme(axis.text.x=element_blank(),
+        axis.text.y=element_blank(),
+        axis.ticks =element_blank(),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        plot.subtitle = element_text(size = 9,face = "italic"),
+        plot.title = element_text(size = 10, face = "bold"),
+        panel.background = element_blank(),
+        panel.border = element_rect(colour = "grey", fill=NA, size=0.8)
+        )
+
+
+plot2 <- ggplot() +
+  geom_sf(data = vars_net.long %>% filter(Variable == "Abandoned_Cars"), aes(fill=value), colour=NA) +
+  scale_fill_viridis(option = "magma") + 
+  labs(title = "Abandoned Cars") +
+  theme(axis.text.x=element_blank(),
+        axis.text.y=element_blank(),
+        axis.ticks =element_blank(),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        plot.subtitle = element_text(size = 9,face = "italic"),
+        plot.title = element_text(size = 10, face = "bold"),
+        panel.background = element_blank(),
+        panel.border = element_rect(colour = "grey", fill=NA, size=0.8)
+        )
+
+plot3 <- ggplot() +
+  geom_sf(data = vars_net.long %>% filter(Variable == "Bank"), aes(fill=value), colour=NA) +
+  scale_fill_viridis(option = "magma") + 
+  labs(title = "Banks") +
+  theme(axis.text.x=element_blank(),
+        axis.text.y=element_blank(),
+        axis.ticks =element_blank(),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        plot.subtitle = element_text(size = 9,face = "italic"),
+        plot.title = element_text(size = 10, face = "bold"),
+        panel.background = element_blank(),
+        panel.border = element_rect(colour = "grey", fill=NA, size=0.8)
+        )
+
+plot4 <- ggplot() +
+  geom_sf(data = vars_net.long %>% filter(Variable == "Graffiti"), aes(fill=value), colour=NA) +
+  scale_fill_viridis(option = "magma") + 
+  labs(title = "Graffiti") +
+  theme(axis.text.x=element_blank(),
+        axis.text.y=element_blank(),
+        axis.ticks =element_blank(),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        plot.subtitle = element_text(size = 9,face = "italic"),
+        plot.title = element_text(size = 10, face = "bold"),
+        panel.background = element_blank(),
+        panel.border = element_rect(colour = "grey", fill=NA, size=0.8)
+        )
+
+
+plot5 <- ggplot() +
+  geom_sf(data = vars_net.long %>% filter(Variable == "Liquor_Retail"), aes(fill=value), colour=NA) +
+  scale_fill_viridis(option = "magma") + 
+  labs(title = "Liquor Retail") +
+  theme(axis.text.x=element_blank(),
+        axis.text.y=element_blank(),
+        axis.ticks =element_blank(),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        plot.subtitle = element_text(size = 9,face = "italic"),
+        plot.title = element_text(size = 10, face = "bold"),
+        panel.background = element_blank(),
+        panel.border = element_rect(colour = "grey", fill=NA, size=0.8)
+        )
+
+plot6 <- ggplot() +
+  geom_sf(data = vars_net.long %>% filter(Variable == "Sanitation"), aes(fill=value), colour=NA) +
+  scale_fill_viridis(option = "magma") + 
+  labs(title = "Sanitation") +
+  theme(axis.text.x=element_blank(),
+        axis.text.y=element_blank(),
+        axis.ticks =element_blank(),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        plot.subtitle = element_text(size = 9,face = "italic"),
+        plot.title = element_text(size = 10, face = "bold"),
+        panel.background = element_blank(),
+        panel.border = element_rect(colour = "grey", fill=NA, size=0.8)
+        )
+
+plot7 <- ggplot() +
+  geom_sf(data = vars_net.long %>% filter(Variable == "Shot_Spotter"), aes(fill=value), colour=NA) +
+  scale_fill_viridis(option = "magma") + 
+  labs(title = "Shot Spotter") +
+  theme(axis.text.x=element_blank(),
+        axis.text.y=element_blank(),
+        axis.ticks =element_blank(),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        plot.subtitle = element_text(size = 9,face = "italic"),
+        plot.title = element_text(size = 10, face = "bold"),
+        panel.background = element_blank(),
+        panel.border = element_rect(colour = "grey", fill=NA, size=0.8)
+        )
+
+
+plot8 <- ggplot() +
+  geom_sf(data = vars_net.long %>% filter(Variable == "Street_Lights_Out"), aes(fill=value), colour=NA) +
+  scale_fill_viridis(option = "magma") + 
+  labs(title = "Street Light Out") +
+  theme(axis.text.x=element_blank(),
+        axis.text.y=element_blank(),
+        axis.ticks =element_blank(),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        plot.subtitle = element_text(size = 9,face = "italic"),
+        plot.title = element_text(size = 10, face = "bold"),
+        panel.background = element_blank(),
+        panel.border = element_rect(colour = "grey", fill=NA, size=0.8)
+        )
+
+wrap_plots(
+  plot1, plot3, plot2, plot4,
+  plot5, plot6, plot7, plot8,
+  ncol = 4  
+)
+
+
+```
+
+
+```{r calculate nearest distance, warning=FALSE, message=FALSE}
+
+st_c <- st_coordinates
+st_coid <- st_centroid
+
+vars_net <-
+  vars_net %>%
+    mutate(
+      Abandoned_Buildings.nn =
+        nn_function(st_c(st_coid(vars_net)), st_c(abandonBuildings),3),
+      Abandoned_Cars.nn =
+        nn_function(st_c(st_coid(vars_net)), st_c(abandonCars),3),
+      Graffiti.nn =
+        nn_function(st_c(st_coid(vars_net)), st_c(graffiti),3),
+      Liquor_Retail.nn =
+        nn_function(st_c(st_coid(vars_net)), st_c(liquorRetail),3),
+      Street_Lights_Out.nn =
+        nn_function(st_c(st_coid(vars_net)), st_c(streetLightsOut),3),
+      Sanitation.nn =
+        nn_function(st_c(st_coid(vars_net)), st_c(sanitation),3),
+      Shot_Spotter.nn =
+        nn_function(st_c(st_coid(vars_net)), st_c(shotSpotter),3))
+
+vars_net <-
+  vars_net %>% mutate(Bank.nn = nn_function(st_c(st_coid(vars_net)), st_c(Banks),3))
+ 
+
+```
+
+
+```{r visualize nearest distance fig.height=8, fig.width=11}
+vars_net.long.nn <- 
+  dplyr::select(vars_net, ends_with(".nn")) %>%
+    gather(Variable, value, -geometry)
+
+
+p1.nn <- ggplot() +
+  geom_sf(data = vars_net.long.nn %>% filter(Variable == "Abandoned_Buildings.nn"), aes(fill=value), colour=NA) +
+  scale_fill_viridis(option = "magma") + 
+  labs(title = "Abandoned Buildings NN") +
+  theme(axis.text.x=element_blank(),
+        axis.text.y=element_blank(),
+        axis.ticks =element_blank(),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        plot.subtitle = element_text(size = 9,face = "italic"),
+        plot.title = element_text(size = 10, face = "bold"),
+        panel.background = element_blank(),
+        panel.border = element_rect(colour = "grey", fill=NA, size=0.8)
+        )
+
+
+p2.nn <- ggplot() +
+  geom_sf(data = vars_net.long.nn %>% filter(Variable == "Abandoned_Cars.nn"), aes(fill=value), colour=NA) +
+  scale_fill_viridis(option = "magma") + 
+  labs(title = "Abandoned Cars NN") +
+  theme(axis.text.x=element_blank(),
+        axis.text.y=element_blank(),
+        axis.ticks =element_blank(),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        plot.subtitle = element_text(size = 9,face = "italic"),
+        plot.title = element_text(size = 10, face = "bold"),
+        panel.background = element_blank(),
+        panel.border = element_rect(colour = "grey", fill=NA, size=0.8)
+        )
+
+p3.nn <- ggplot() +
+  geom_sf(data = vars_net.long.nn %>% filter(Variable == "Bank.nn"), aes(fill=value), colour=NA) +
+  scale_fill_viridis(option = "magma") + 
+  labs(title = "Banks NN") +
+  theme(axis.text.x=element_blank(),
+        axis.text.y=element_blank(),
+        axis.ticks =element_blank(),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        plot.subtitle = element_text(size = 9,face = "italic"),
+        plot.title = element_text(size = 10, face = "bold"),
+        panel.background = element_blank(),
+        panel.border = element_rect(colour = "grey", fill=NA, size=0.8)
+        )
+
+p4.nn <- ggplot() +
+  geom_sf(data = vars_net.long.nn %>% filter(Variable == "Graffiti.nn"), aes(fill=value), colour=NA) +
+  scale_fill_viridis(option = "magma") + 
+  labs(title = "Graffiti NN") +
+  theme(axis.text.x=element_blank(),
+        axis.text.y=element_blank(),
+        axis.ticks =element_blank(),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        plot.subtitle = element_text(size = 9,face = "italic"),
+        plot.title = element_text(size = 10, face = "bold"),
+        panel.background = element_blank(),
+        panel.border = element_rect(colour = "grey", fill=NA, size=0.8)
+        )
+
+
+p5.nn <- ggplot() +
+  geom_sf(data = vars_net.long.nn %>% filter(Variable == "Liquor_Retail.nn"), aes(fill=value), colour=NA) +
+  scale_fill_viridis(option = "magma") + 
+  labs(title = "Liquor Retail NN") +
+  theme(axis.text.x=element_blank(),
+        axis.text.y=element_blank(),
+        axis.ticks =element_blank(),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        plot.subtitle = element_text(size = 9,face = "italic"),
+        plot.title = element_text(size = 10, face = "bold"),
+        panel.background = element_blank(),
+        panel.border = element_rect(colour = "grey", fill=NA, size=0.8)
+        )
+
+p6.nn <- ggplot() +
+  geom_sf(data = vars_net.long.nn %>% filter(Variable == "Sanitation.nn"), aes(fill=value), colour=NA) +
+  scale_fill_viridis(option = "magma") + 
+  labs(title = "Sanitation NN") +
+  theme(axis.text.x=element_blank(),
+        axis.text.y=element_blank(),
+        axis.ticks =element_blank(),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        plot.subtitle = element_text(size = 9,face = "italic"),
+        plot.title = element_text(size = 10, face = "bold"),
+        panel.background = element_blank(),
+        panel.border = element_rect(colour = "grey", fill=NA, size=0.8)
+        )
+
+p7.nn <- ggplot() +
+  geom_sf(data = vars_net.long.nn %>% filter(Variable == "Shot_Spotter.nn"), aes(fill=value), colour=NA) +
+  scale_fill_viridis(option = "magma") + 
+  labs(title = "Shot Spotter NN") +
+  theme(axis.text.x=element_blank(),
+        axis.text.y=element_blank(),
+        axis.ticks =element_blank(),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        plot.subtitle = element_text(size = 9,face = "italic"),
+        plot.title = element_text(size = 10, face = "bold"),
+        panel.background = element_blank(),
+        panel.border = element_rect(colour = "grey", fill=NA, size=0.8)
+        )
+
+
+p8.nn <- ggplot() +
+  geom_sf(data = vars_net.long.nn %>% filter(Variable == "Street_Lights_Out.nn"), aes(fill=value), colour=NA) +
+  scale_fill_viridis(option = "magma") + 
+  labs(title = "Street Light Out NN") +
+  theme(axis.text.x=element_blank(),
+        axis.text.y=element_blank(),
+        axis.ticks =element_blank(),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        plot.subtitle = element_text(size = 9,face = "italic"),
+        plot.title = element_text(size = 10, face = "bold"),
+        panel.background = element_blank(),
+        panel.border = element_rect(colour = "grey", fill=NA, size=0.8)
+        )
+
+wrap_plots(
+  p1.nn, p3.nn, p2.nn, p4.nn,
+  p5.nn, p6.nn, p7.nn, p8.nn,
+  ncol = 4  
+)
+
+
+```
+
+
+```{r distribution of robbery, message=FALSE, warning=FALSE}
+
+final_net <-
+  left_join(robbery21_net, st_drop_geometry(vars_net), by="uniqueID")
+
+ggplot(final_net, aes(x = countRobbery)) +
+  geom_histogram( fill="#56106E", color="#e9ecef") + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  theme(plot.subtitle = element_text(size = 9,face = "italic"),
+        plot.title = element_text(size = 12, face = "bold"), 
+        axis.text.x=element_text(size=6),
+        axis.text.y=element_text(size=6), 
+        axis.title=element_text(size=8), 
+        panel.background = element_blank(),
+        panel.border = element_rect(colour = "grey", fill=NA, size=0.8)) + 
+  labs(title = "Distribution of Robberies in Chicago 2021",
+       caption = "Data: Chicago Data Portal Crimes 2021") +
+  xlab("Robbery Incidents") +
+  ylab("Count")
+```
+
+```{r calculate local moran I}
+
+final_net.nb <- poly2nb(as_Spatial(final_net), queen=TRUE)
+final_net.weights <- nb2listw(final_net.nb, style="W", zero.policy=TRUE)
+
+local_morans <- localmoran(final_net$countRobbery, final_net.weights, zero.policy=TRUE) %>% 
+  as.data.frame()
+
+final_net.localMorans <- 
+  cbind(local_morans, as.data.frame(final_net)) %>% 
+  st_sf() %>%
+  dplyr::select(Robbery_Count = countRobbery, 
+                Local_Morans_I = Ii, 
+                P_Value = `Pr(z != E(Ii))`) %>%
+  mutate(Significant_Hotspots = ifelse(P_Value <= 0.001, 1, 0)) %>%
+  gather(Variable, Value, -geometry)
+```
+
+
+```{r visualize moran I, fig.height=8, fig.width=11}
+
+moran1 <- ggplot() +
+  geom_sf(data = final_net.localMorans %>% filter(Variable == "Robbery_Count"), aes(fill=Value), colour=NA) +
+  scale_fill_viridis(option = "magma") + 
+  labs(title = "Robbery Count") +
+  theme(axis.text.x=element_blank(),
+        axis.text.y=element_blank(),
+        axis.ticks =element_blank(),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        plot.subtitle = element_text(size = 9,face = "italic"),
+        plot.title = element_text(size = 10, face = "bold"),
+        panel.background = element_blank(),
+        panel.border = element_rect(colour = "grey", fill=NA, size=0.8)
+        )
+
+moran2 <- ggplot() +
+  geom_sf(data = final_net.localMorans %>% filter(Variable == "Local_Morans_I"), aes(fill=Value), colour=NA) +
+  scale_fill_viridis(option = "magma") + 
+  labs(title = "Local Morans I") +
+  theme(axis.text.x=element_blank(),
+        axis.text.y=element_blank(),
+        axis.ticks =element_blank(),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        plot.subtitle = element_text(size = 9,face = "italic"),
+        plot.title = element_text(size = 10, face = "bold"),
+        panel.background = element_blank(),
+        panel.border = element_rect(colour = "grey", fill=NA, size=0.8)
+        )
+
+moran3 <- ggplot() +
+  geom_sf(data = final_net.localMorans %>% filter(Variable == "P_Value"), aes(fill=Value), colour=NA) +
+  scale_fill_viridis(option = "magma") + 
+  labs(title = "P Value") +
+  theme(axis.text.x=element_blank(),
+        axis.text.y=element_blank(),
+        axis.ticks =element_blank(),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        plot.subtitle = element_text(size = 9,face = "italic"),
+        plot.title = element_text(size = 10, face = "bold"),
+        panel.background = element_blank(),
+        panel.border = element_rect(colour = "grey", fill=NA, size=0.8)
+        )
+
+
+moran4 <- ggplot() +
+  geom_sf(data = final_net.localMorans %>% filter(Variable == "Significant_Hotspots"), aes(fill=Value), colour=NA) +
+  scale_fill_viridis(option = "magma") + 
+  labs(title = "Signigicant Hotspots") +
+  theme(axis.text.x=element_blank(),
+        axis.text.y=element_blank(),
+        axis.ticks =element_blank(),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        plot.subtitle = element_text(size = 9,face = "italic"),
+        plot.title = element_text(size = 10, face = "bold"),
+        panel.background = element_blank(),
+        panel.border = element_rect(colour = "grey", fill=NA, size=0.8)
+        )
+
+wrap_plots(
+moran1, moran2, moran3, moran4, 
+  ncol = 4  
+)
+```
+
+
+```{r calculate significant robbery points, warning=FALSE, message=FALSE}
+
+final_net <-
+  final_net %>% 
+  mutate(robbery.isSig = ifelse(localmoran(final_net$countRobbery, 
+                             final_net.weights)[,5] <= 0.0000001, 1, 0)) %>%
+  mutate(robbery.isSig.dist = nn_function(st_coordinates(st_centroid(final_net)),
+                                          st_coordinates(st_centroid(
+                                            filter(final_net, robbery.isSig == 1))), 1))
+```
+
+
+```{r visualize robbery NN Distance}
+
+ggplot() +
+      geom_sf(data = final_net, aes(fill=robbery.isSig.dist), colour=NA) +
+      scale_fill_viridis(option = "magma", name="NN Distance") +
+      labs(title="Robbery NN Distance") +
+      theme(axis.text.x=element_blank(),
+        axis.text.y=element_blank(),
+        axis.ticks =element_blank(),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        plot.subtitle = element_text(size = 9,face = "italic"),
+        plot.title = element_text(size = 10, face = "bold"),
+        panel.background = element_blank(),
+        panel.border = element_rect(colour = "grey", fill=NA, size=0.8)
+        )
+
+
+```
+
+
+```{r fig.height=15, fig.width=8}
+
+final_net_long <- final_net%>% 
+  st_drop_geometry() %>% 
+  dplyr::select(-c(uniqueID, cvID)) %>% 
+  pivot_longer(cols = -countRobbery, # everything except measurement
+               names_to = "Type", # categorizes all quantitative variables into Type
+               values_to = "Number") 
+
+correlation.cor <-
+  final_net_long %>%
+    group_by(Type) %>%
+    summarize(correlation = cor(Number, countRobbery, use = "complete.obs"))
+
+final_net_long %>%
+  ggplot(aes(x= Number, y = countRobbery)) +
+  geom_point(size = 0.01, color = "#000004") +  
+  geom_text(data = correlation.cor, aes(label = paste("r =", round(correlation, 2))),
+            x=-Inf, y=Inf, vjust = 1.5, hjust = -.1, size=3) +
+  geom_smooth(method='lm', formula= y~x, lwd=0.5, se = FALSE, color = "#BB3754") +
+  facet_wrap(~ Type, scales = "free", ncol = 2, labeller= labeller(Type = c(
+    `Abandoned_Buildings` = "Abandoned Buildings",
+    `Abandoned_Buildings.nn` = "Distance to Abandoned Buildings",
+    `Abandoned_Cars` = "Abandoned Cars",
+    `Abandoned_Cars.nn` = "Distance to Abandoned Cars",
+    `Bank` = "Bank",
+    `Bank.nn` = "Distance to Bank",
+    `Graffiti` = "Graffiti",
+    `Graffiti.nn` = "Distance to Graffiti",
+    `Liquor_Retail` = "Liquor Retail",
+    `Liquor_Retail.nn` = "Distance to Liquor Retail",
+    `robbery.isSig` = "Significant Robbery",
+    `robbery.isSig.dist` = "Distance to Significant Robbery",
+    `Sanitation` = "Sanitation",
+    `Sanitation.nn` = "Distance to Sanitation",
+    `Shot_Spotter` = "Shot Spotter", 
+    `Shot_Spotter.nn` = "Distance to Shot Spotter",
+    `Street_Lights_Out` = "Street Light Out",
+    `Street_Lights_Out.nn` = "Distance to Broken Street Light")))  +
+  labs(title = "Scatter Plots of Predictor Variables",
+       caption = "Data: Chicago Data Portal") +
+  theme(plot.subtitle = element_text(size = 9,face = "italic"),
+        plot.title = element_text(size = 12, face = "bold"), 
+        axis.text.x=element_text(size=6),
+        axis.text.y=element_text(size=6), 
+        axis.title=element_text(size=8), 
+        panel.background = element_blank(),
+        panel.border = element_rect(colour = "grey", fill=NA, size=0.8))
+
+```
+
+
+```{r random k-fold regression, warning=FALSE, results='hide'}
+
+reg.vars <- c("Abandoned_Buildings.nn", "Abandoned_Cars.nn", "Graffiti.nn", 
+              "Liquor_Retail.nn", "Street_Lights_Out.nn", "Sanitation.nn", 
+              "Shot_Spotter.nn", "Bank.nn")
+
+reg.ss.vars <- c("Abandoned_Buildings.nn", "Abandoned_Cars.nn", "Graffiti.nn", 
+                 "Liquor_Retail.nn", "Street_Lights_Out.nn", "Sanitation.nn", 
+                 "Shot_Spotter.nn", "Bank.nn", "robbery.isSig", "robbery.isSig.dist")
+
+reg.cv <- crossValidate(
+  dataset = final_net,
+  id = "cvID",
+  dependentVariable = "countRobbery",
+  indVariables = reg.vars) %>%
+    dplyr::select(cvID = cvID, countRobbery, Prediction, geometry)
+
+reg.ss.cv <- crossValidate(
+  dataset = final_net,
+  id = "cvID",
+  dependentVariable = "countRobbery",
+  indVariables = reg.ss.vars) %>%
+    dplyr::select(cvID = cvID, countRobbery, Prediction, geometry)
+
+```
+
+
+```{r spatial logo cv regression, warning=FALSE, message=FALSE, results='hide'}
+
+neighborhoods <- 
+  st_read("https://raw.githubusercontent.com/blackmad/neighborhoods/master/chicago.geojson") %>%
+  st_transform(st_crs(fishnet)) 
+
+final_net <-
+  st_centroid(final_net) %>%
+    st_join(dplyr::select(neighborhoods, name)) %>%
+      st_drop_geometry() %>%
+      left_join(dplyr::select(final_net, geometry, uniqueID)) %>%
+      st_sf() %>%
+  na.omit()
+
+reg.spatialCV <- crossValidate(
+  dataset = final_net,
+  id = "name",
+  dependentVariable = "countRobbery",
+  indVariables = reg.vars) %>%
+    dplyr::select(cvID = name, countRobbery, Prediction, geometry)
+
+reg.ss.spatialCV <- crossValidate(
+  dataset = final_net,
+  id = "name",
+  dependentVariable = "countRobbery",
+  indVariables = reg.ss.vars) %>%
+    dplyr::select(cvID = name, countRobbery, Prediction, geometry)
+```
+
+
+```{r summarize regression}
+
+reg.summary <- 
+  rbind(
+    mutate(reg.cv,           Error = Prediction - countRobbery,
+                             Regression = "Random k-fold CV: Just Risk Factors"),
+                             
+    mutate(reg.ss.cv,        Error = Prediction - countRobbery,
+                             Regression = "Random k-fold CV: Spatial Process"),
+    
+    mutate(reg.spatialCV,    Error = Prediction - countRobbery,
+                             Regression = "Spatial LOGO-CV: Just Risk Factors"),
+                             
+    mutate(reg.ss.spatialCV, Error = Prediction - countRobbery,
+                             Regression = "Spatial LOGO-CV: Spatial Process")) %>%
+    st_sf() 
+```
+
+
+```{r}
+
+error_by_reg_and_fold <- 
+  reg.summary %>%
+    group_by(Regression, cvID) %>% 
+    summarize(Mean_Error = mean(Prediction - countRobbery, na.rm = T),
+              MAE = mean(abs(Mean_Error), na.rm = T),
+              SD_MAE = mean(abs(Mean_Error), na.rm = T)) %>%
+  ungroup()
+
+st_drop_geometry(error_by_reg_and_fold) %>%
+  group_by(Regression) %>% 
+    summarize(Mean_MAE = round(mean(MAE), 2),
+              SD_MAE = round(sd(MAE), 2)) %>%
+  kable(col.name=c("Regression", 'Mean Absolute Error','Standard Deviation MAE')) %>%
+    kable_styling(bootstrap_options = c("striped", "hover", "condensed")) %>%
+    row_spec(2, color = "black", background = "#FCFFA4") %>%
+    row_spec(4, color = "black", background = "#FCFFA4") 
+
+
+```
+
+```{r visualize error fig.height=8, fig.width=11}
+
+error_by_reg_and_fold %>% 
+  ggplot() +
+  geom_sf(aes(fill=MAE), color="transparent") +
+  scale_fill_viridis(option = "magma", direction = -1) + 
+  facet_wrap(~Regression, ncol = 4) +
+   labs(title = "MAE by Fold and Regression",
+       caption = "Data: Chicago Data Portal") +
+  theme(legend.position = "bottom",
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank(),
+        axis.text.y=element_blank(),
+        axis.ticks.y=element_blank(),
+        plot.subtitle = element_text(size = 9,face = "italic"),
+        plot.title = element_text(size = 12, face = "bold"),
+        panel.background = element_blank(),
+        panel.border = element_rect(colour = "grey", fill=NA, size=0.8),
+        strip.text = element_text(size = 7)) 
+
+```
+
+
+```{r download race data, message=FALSE, warning=FALSE, results='hide'}
+
+census_api_key(dlgInput(
+  "Enter a Census API Key", # ask for an api key
+  Sys.getenv("CENSUS_API_KEY")
+)$res,
+overwrite = TRUE)
+tracts21 <- 
+  get_acs(geography = "tract", 
+          variables = c("B02001_001E", # total population
+            "B02001_002E", # white population
+            "B02001_003E", # black population
+            "B02001_005E", # asian population
+            "B03002_012E"), 
+          year=2021, state=17, county=031, 
+          geometry=TRUE, output="wide") %>%
+  st_transform('ESRI:102271') %>% 
+  rename(TotalPop = B02001_001E, 
+         Whites = B02001_002E,
+         African_Americans = B02001_003E,
+         Asians = B02001_005E,
+         Latinx = B03002_012E) %>% 
+  mutate(pctMinority = ifelse(TotalPop > 0, (African_Americans + Asians + Latinx ) / TotalPop, 0), 
+         majority = ifelse(pctMinority > 0.5, "minority", "majority")) %>%   .[neighborhoods,]
+
+
+```
+
+```{r visualize race context}
+
+ggplot() + geom_sf(data = na.omit(tracts21), aes(fill = majority), color = NA) +
+    scale_fill_manual(values = c("#BB3754", "#56106E"), name="Race Context") +
+    labs(title = "Race Context ",
+         caption = "Data: American Community Survey 2021") +
+  theme(
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank(),
+        axis.text.y=element_blank(),
+        axis.ticks.y=element_blank(),
+        plot.title = element_text(size = 12, face = "bold"),
+        panel.background = element_blank(),
+        panel.border = element_rect(colour = "grey", fill=NA, size=0.4)
+        ) 
+```
+
+
+
+
+```{r generalizability by race, message=FALSE, warning=FALSE}
+
+joinrace <- st_centroid(reg.summary) %>% 
+  st_intersection(tracts21 %>%dplyr:: select(pctMinority)) %>% 
+  st_drop_geometry() %>% 
+  group_by(cvID) %>% 
+  summarize(meanMinor = mean(pctMinority))
+
+
+reg.summary <- reg.summary %>% 
+  left_join(joinrace, by = "cvID") 
+
+
+reg.summary %>% 
+  mutate(raceContext = ifelse(meanMinor > .6, "Minority", "Majority White")) %>% 
+  st_drop_geometry() %>% 
+  group_by(Regression, raceContext) %>%
+  summarize(mean.Error = mean(Error, na.rm = T)) %>%
+  spread(raceContext, mean.Error) %>%
+  kable() %>%
+    kable_styling(bootstrap_options = c("striped", "hover", "condensed")) %>%
+    row_spec(2, color = "black", background = "#FCFFA4") %>%
+    row_spec(4, color = "black", background = "#FCFFA4") 
+
+```
+
+```{r calculate 2021 Kernal Density}
+
+rob_ppp <- as.ppp(st_coordinates(robbery21), W = st_bbox(final_net))
+rob_KD.1000 <- spatstat.explore::density.ppp(rob_ppp, 1000)
+rob_KD.df <- data.frame(rasterToPoints(mask(raster(rob_KD.1000), as(neighborhoods, 'Spatial'))))
+
+
+ggplot(data=rob_KD.df, aes(x=x, y=y)) +
+  geom_raster(aes(fill=layer)) + 
+  coord_sf(crs=st_crs(final_net)) + 
+  scale_fill_viridis(option = "magma", name="Density") +
+  labs(title = "Kernel Density of Robbery 1000ft Radii") +
+    theme(axis.text.x=element_blank(),
+        axis.text.y=element_blank(),
+        axis.ticks =element_blank(),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        plot.subtitle = element_text(size = 9,face = "italic"),
+        plot.title = element_text(size = 12, face = "bold"),
+        panel.background = element_blank(),
+        panel.border = element_rect(colour = "grey", fill=NA, size=0.8)
+        )
+```
+
+
+
+```{r download 2022 robery data, warning=FALSE, message=FALSE}
+
+robbery22 <- 
+  read.socrata("https://data.cityofchicago.org/Public-Safety/Crimes-2022/9hwr-2zxp") %>% 
+   filter(Primary.Type == "ROBBERY") %>% 
+  mutate(x = gsub("[()]", "", Location)) %>%
+  separate(x,into= c("Y","X"), sep=",") %>%
+  mutate(X = as.numeric(X),
+         Y = as.numeric(Y)) %>% 
+  na.omit %>%
+  st_as_sf(coords = c("X", "Y"), crs = 4326, agr = "constant") %>%
+  st_transform('ESRI:102271') %>% 
+  distinct() %>%
+  .[fishnet,]
+
+```
+
+
+```{r categorize KDE}
+
+rob_KDE_sum <- as.data.frame(rob_KD.1000) %>%
+  st_as_sf(coords = c("x", "y"), crs = st_crs(final_net)) %>%
+  aggregate(., final_net, mean) 
+
+kde_breaks <- classIntervals(rob_KDE_sum$value, 
+                             n = 5, "fisher")
+
+rob_KDE_sf <- rob_KDE_sum %>%
+  mutate(label = "Kernel Density",
+         Risk_Category = classInt::findCols(kde_breaks),
+         Risk_Category = case_when(
+           Risk_Category == 5 ~ "5th",
+           Risk_Category == 4 ~ "4th",
+           Risk_Category == 3 ~ "3rd",
+           Risk_Category == 2 ~ "2nd",
+           Risk_Category == 1 ~ "1st")) %>%
+  cbind(
+    aggregate(
+      dplyr::select(robbery21) %>% mutate(robberyCount = 1), ., sum) %>%
+    mutate(robberyCount = replace_na(robberyCount, 0))) %>%
+  dplyr::select(label, Risk_Category, robberyCount)
+
+```
+
+
+```{r categorize random k fold}
+
+ml_breaks <- classIntervals(reg.ss.spatialCV$Prediction, 
+                             n = 5, "fisher")
+rob_risk_sf <-
+  reg.ss.spatialCV %>%
+  mutate(label = "Risk Predictions Spatial",
+         Risk_Category =classInt::findCols(ml_breaks),
+         Risk_Category = case_when(
+           Risk_Category == 5 ~ "5th",
+           Risk_Category == 4 ~ "4th",
+           Risk_Category == 3 ~ "3rd",
+           Risk_Category == 2 ~ "2nd",
+           Risk_Category == 1 ~ "1st")) %>%
+  cbind(
+    aggregate(
+      dplyr::select(robbery21) %>% mutate(robberyCount = 1), ., sum) %>%
+      mutate(robberyCount = replace_na(robberyCount, 0))) %>%
+  dplyr::select(label,Risk_Category, robberyCount)
+
+```
+
+
+```{r categorize spatial logo}
+ml_breaks_simple <- classIntervals(reg.ss.cv$Prediction, 
+                             n = 5, "fisher")
+rob_risk_sf_simple <-
+  reg.ss.cv %>%
+  mutate(label = "Risk Predictions Simple",
+         Risk_Category =classInt::findCols(ml_breaks_simple),
+         Risk_Category = case_when(
+           Risk_Category == 5 ~ "5th",
+           Risk_Category == 4 ~ "4th",
+           Risk_Category == 3 ~ "3rd",
+           Risk_Category == 2 ~ "2nd",
+           Risk_Category == 1 ~ "1st")) %>%
+  cbind(
+    aggregate(
+      dplyr::select(robbery21) %>% mutate(robberyCount = 1), ., sum) %>%
+      mutate(robberyCount = replace_na(robberyCount, 0))) %>%
+  dplyr::select(label,Risk_Category, robberyCount)
+```
+
+
+
+```{r prediction comparisons map}
+rbind(rob_KDE_sf, rob_risk_sf, rob_risk_sf_simple) %>%
+  na.omit() %>%
+  gather(Variable, Value, -label, -Risk_Category, -geometry) %>%
+  ggplot() +
+    geom_sf(aes(fill = Risk_Category), colour = NA) +
+    facet_wrap(~label, ) +
+    scale_fill_viridis(option = "magma", discrete = TRUE, name = "Risk Category") +
+    labs(title="Comparison of Kernel Density and Risk Predictions",
+         subtitle="2021 robbery risk predictions; 2018 robberies") + 
+  theme(axis.text.x=element_blank(),
+        axis.text.y=element_blank(),
+        axis.ticks =element_blank(),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        plot.subtitle = element_text(size = 9,face = "italic"),
+        plot.title = element_text(size = 12, face = "bold"),
+        panel.background = element_blank(),
+        panel.border = element_rect(colour = "grey", fill=NA, size=0.8)
+        )
+```
+A well fit model should show that the risk predictions capture a greater share of 2018 burglaries in the highest risk category relative to the Kernel density.
+
+```{r prediction comparisons figure}
+rbind(rob_KDE_sf, rob_risk_sf, rob_risk_sf_simple) %>%
+  st_drop_geometry() %>%
+  na.omit() %>%
+  gather(Variable, Value, -label, -Risk_Category) %>%
+  group_by(label, Risk_Category) %>%
+  summarize(countRobbery = sum(Value)) %>%
+  ungroup() %>%
+  group_by(label) %>%
+  mutate(Pcnt_of_test_set_crimes = countRobbery / sum(countRobbery)) %>%
+    ggplot(aes(Risk_Category,Pcnt_of_test_set_crimes)) +
+      geom_bar(aes(fill=label), position="dodge", stat="identity") +
+      scale_fill_viridis(option = "magma", discrete = TRUE, name = "Model", direction = -1) +
+      labs(title = "Risk Prediction vs. Kernel Density",
+           y = "% of Test Set Burglaries (per model)",
+           x = "Risk Category") +
+  theme_bw() +
+      theme(axis.text.x = element_text(angle = 45, vjust = 0.5))
+```
+
+
+
+
+
+
+
+
+
+
