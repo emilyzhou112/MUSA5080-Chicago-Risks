@@ -14,9 +14,9 @@ editor_options:
     wrap: sentence
 ---
 
-Version 1.0 \| First Created Oct 3, 2023 \| Updated Oct 11, 2023
+Version 1.0 \| First Created Oct 12, 2023 \| Updated Oct 18, 2023
 
-Keywords: Ordinary Least Square Regression, Spatial Auto-correlation, Moran's I, Monte Carlo Simulation, Getis-Ord Gi*, K-fold Cross Validation, K Nearest Neighbors
+Keywords: Poisson Regression, Spatial Hotspot Analysis, Local Moran's I, Spatial LOGO Cross Validation, K-fold Cross Validation, K Nearest Neighbors, Kernel Density Estimation
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
@@ -51,6 +51,18 @@ source("https://raw.githubusercontent.com/urbanSpatial/Public-Policy-Analytics-L
 
 # Introduction
 
+Predictive policing is an application of machine learning through building geospatial risk models that aggregate historical crime data, socioeconomic factors, and spatial attributes to forecast where and when crimes are likely to occur. These models are crucial because they offer law enforcement agencies a proactive approach to crime prevention. While traditional policing method often rely on reacting to incidents after they occur, predictive policing enables law enforcement to anticipate and prevent crimes in advance. Because of that, law enforcement agencies can optimize their resources and deploy officers strategically, leading to more cost-effective law enforcement practices. 
+
+However, there are notable limitations and biases associated with these models. One significant concern is the potential for bias in the historical data used to train these algorithms. If the historical data reflects existing biases in law enforcement practices, such as racial profiling or discriminatory policies, the algorithms can perpetuate these biases, leading to unfair or disproportionate targeting of certain communities. Additionally, there is the risk of self-fulfilling prophecies: if law enforcement concentrates their efforts in specific areas predicted by the algorithm, crime data from those areas might be inflated, creating a feedback loop of over-policing. That said, predictions from geospatial risk models can be thought of as latent risk - areas at risk even if a crime has not actually been reported there. Selection bias can be a problematic issue for it is very likely that observed crime would discount actual crime risks. 
+
+With these in mind, the goal of this report is to fit a geospatial risk model predicting robbery incidents in Chicago, a city facing various crime and policing challenges, to the best of our ability. Robberies are often subjected to selection bias because 1) certainly not all incidents of robbery are reported to the police and 2) areas that had been heavily patrolled in the past due to higher robbery incidents will continue to report higher robbery incidents. For any type of crime, the hypothesis is that crime risk is a function of exposure to a series of geospatial risk and protective factors, such as blight or recreation centers, respectively. As exposure to risk factors increases, so does crime risk. In addition to identifying risk factors, the model used in this report also considers spatial factors to improve accuracy. Poisson regression is used here for its compatibility with count data. All data sets used for predictions here are downloaded from [Chicago Data Portal](https://data.cityofchicago.org/). 
+
+This report is structured as follow: **Firstly**, we did a close examination of our dependent variable, in this case robbery incidents.**Secondly**, we discuss our rational of our selection of risk factors and presented our approach to feature engineering, which includes the calculation of nearest distance to each risk factors and spatial hotspots. **Thirdly**, we fit two regression models: one simple poisson regression and one that account for spatial attributes. We subsequently perform two kinds of cross validation: one random k-fold cross validation. **Finally**, we compared the errors of different regression models, tested their generalization, and compare our models to the traditional kernel density estimation. 
+
+The GitHub repository for this report is [here](https://github.com/emilyzhou112/MUSA5080-Chicago-Risks). 
+
+
+# Robbery Incidents
 ```{r load outcome variable, warning=FALSE, message=FALSE}
 
 chicagoBoundary <- 
@@ -167,7 +179,26 @@ ggplot() +
         )
 ```
 
+```{r distribution of robberies, message=FALSE, warning=FALSE}
+ggplot(robbery21_net, aes(x = countRobbery)) +
+  geom_histogram( fill="#56106E", color="#e9ecef") + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  theme(plot.subtitle = element_text(size = 9,face = "italic"),
+        plot.title = element_text(size = 12, face = "bold"), 
+        axis.text.x=element_text(size=6),
+        axis.text.y=element_text(size=6), 
+        axis.title=element_text(size=8), 
+        panel.background = element_blank(),
+        panel.border = element_rect(colour = "grey", fill=NA, size=0.8)) + 
+  labs(title = "Distribution of Robberies in Chicago 2021",
+       caption = "Data: Chicago Data Portal Crimes 2021") +
+  xlab("Robbery Incidents") +
+  ylab("Count")
+```
 
+
+
+# Risk Factors
 ```{r load predictor variables, warning=FALSE, message=FALSE}
 abandonCars <- 
   read.socrata("https://data.cityofchicago.org/Service-Requests/311-Service-Requests-Abandoned-Vehicles/3c9v-pnva") %>%
@@ -407,7 +438,9 @@ wrap_plots(
 
 ```
 
+# Feature Engineering
 
+## Nearest Distance
 ```{r calculate nearest distance, warning=FALSE, message=FALSE}
 
 st_c <- st_coordinates
@@ -438,7 +471,8 @@ vars_net <-
 ```
 
 
-```{r visualize nearest distance fig.height=8, fig.width=11}
+```{r visualize nearest distance, fig.height=8, fig.width=11}
+
 vars_net.long.nn <- 
   dplyr::select(vars_net, ends_with(".nn")) %>%
     gather(Variable, value, -geometry)
@@ -576,30 +610,12 @@ wrap_plots(
 
 ```
 
+## Local Spatial Autocorrelation
 
-```{r distribution of robbery, message=FALSE, warning=FALSE}
+```{r calculate local moran I, message=FALSE, warning=FALSE}
 
 final_net <-
   left_join(robbery21_net, st_drop_geometry(vars_net), by="uniqueID")
-
-ggplot(final_net, aes(x = countRobbery)) +
-  geom_histogram( fill="#56106E", color="#e9ecef") + 
-  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
-  theme(plot.subtitle = element_text(size = 9,face = "italic"),
-        plot.title = element_text(size = 12, face = "bold"), 
-        axis.text.x=element_text(size=6),
-        axis.text.y=element_text(size=6), 
-        axis.title=element_text(size=8), 
-        panel.background = element_blank(),
-        panel.border = element_rect(colour = "grey", fill=NA, size=0.8)) + 
-  labs(title = "Distribution of Robberies in Chicago 2021",
-       caption = "Data: Chicago Data Portal Crimes 2021") +
-  xlab("Robbery Incidents") +
-  ylab("Count")
-```
-
-```{r calculate local moran I}
-
 final_net.nb <- poly2nb(as_Spatial(final_net), queen=TRUE)
 final_net.weights <- nb2listw(final_net.nb, style="W", zero.policy=TRUE)
 
@@ -686,6 +702,7 @@ moran1, moran2, moran3, moran4,
 )
 ```
 
+## Singificant Robbery Clusters
 
 ```{r calculate significant robbery points, warning=FALSE, message=FALSE}
 
@@ -718,9 +735,9 @@ ggplot() +
 
 
 ```
+## All Risk Factors
 
-
-```{r fig.height=15, fig.width=8}
+```{r correlation, fig.height=15, fig.width=8}
 
 final_net_long <- final_net%>% 
   st_drop_geometry() %>% 
@@ -772,6 +789,9 @@ final_net_long %>%
 ```
 
 
+# Poisson Regression
+
+## Random K-Fold CV
 ```{r random k-fold regression, warning=FALSE, results='hide'}
 
 reg.vars <- c("Abandoned_Buildings.nn", "Abandoned_Cars.nn", "Graffiti.nn", 
@@ -798,6 +818,8 @@ reg.ss.cv <- crossValidate(
 
 ```
 
+
+## Spatial LOGO CV
 
 ```{r spatial logo cv regression, warning=FALSE, message=FALSE, results='hide'}
 
@@ -828,7 +850,7 @@ reg.ss.spatialCV <- crossValidate(
     dplyr::select(cvID = name, countRobbery, Prediction, geometry)
 ```
 
-
+## Error Analysis
 ```{r summarize regression}
 
 reg.summary <- 
@@ -848,7 +870,7 @@ reg.summary <-
 ```
 
 
-```{r}
+```{r summarize errors by fold and regression}
 
 error_by_reg_and_fold <- 
   reg.summary %>%
@@ -870,7 +892,7 @@ st_drop_geometry(error_by_reg_and_fold) %>%
 
 ```
 
-```{r visualize error fig.height=8, fig.width=11}
+```{r visualize error,fig.height=8, fig.width=11}
 
 error_by_reg_and_fold %>% 
   ggplot() +
@@ -892,6 +914,9 @@ error_by_reg_and_fold %>%
 
 ```
 
+# Prediction Accuracy 
+
+## Generalizability Test
 
 ```{r download race data, message=FALSE, warning=FALSE, results='hide'}
 
@@ -920,6 +945,7 @@ tracts21 <-
 
 
 ```
+
 
 ```{r visualize race context}
 
@@ -966,6 +992,8 @@ reg.summary %>%
     row_spec(4, color = "black", background = "#FCFFA4") 
 
 ```
+
+## Kernel Desntiy Estimation
 
 ```{r calculate 2021 Kernal Density}
 
@@ -1081,7 +1109,7 @@ rob_risk_sf_simple <-
   dplyr::select(label,Risk_Category, robberyCount)
 ```
 
-
+## Prediction Comparison
 
 ```{r prediction comparisons map}
 rbind(rob_KDE_sf, rob_risk_sf, rob_risk_sf_simple) %>%
