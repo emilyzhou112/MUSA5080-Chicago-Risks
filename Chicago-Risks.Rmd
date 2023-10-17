@@ -46,6 +46,10 @@ library(patchwork)
 root.dir = "https://raw.githubusercontent.com/urbanSpatial/Public-Policy-Analytics-Landing/master/DATA/"
 source("https://raw.githubusercontent.com/urbanSpatial/Public-Policy-Analytics-Landing/master/functions.r")
 
+chicagoBoundary <- 
+  st_read(file.path(root.dir,"/Chapter5/chicagoBoundary.geojson")) %>%
+  st_transform('ESRI:102271') 
+
 ```
 
 
@@ -63,11 +67,10 @@ The GitHub repository for this report is [here](https://github.com/emilyzhou112/
 
 
 # Robbery Incidents
-```{r load outcome variable, warning=FALSE, message=FALSE}
 
-chicagoBoundary <- 
-  st_read(file.path(root.dir,"/Chapter5/chicagoBoundary.geojson")) %>%
-  st_transform('ESRI:102271') 
+The Chicago Data Portal is an online platform that serves as a central repository for a wide range of municipal data sets. The portal maintains a record for crime incidents for Chicago every year. In this report, crime data for 2021 is downloaded using the `RSocrata` package. Socrata is the creator of the open source platform that Chicago uses to share its data. After downloading, robbery incidents were filtered out. Some additional data wrangling removes extraneous characters from the `Location` field with gsub. The resulting field is then converted to separate fields of X and Y coordinates. 
+
+```{r load outcome variable, warning=FALSE, message=FALSE, results='hide'}
 
 robbery21 <- 
   read.socrata("https://data.cityofchicago.org/Public-Safety/Crimes-2021/dwme-t96c") %>% 
@@ -81,8 +84,9 @@ robbery21 <-
     distinct()
 ```
 
+A quick mapping of each individual incident in Chicago reveals that robberies are pretty scattered in all parts of the city, though slightly more concentrated in central and northeast Chicago. 
 
-```{r robbery locations}
+```{r robbery locations, warning=FALSE, message=FALSE, fig.align = 'center'}
 
 ggplot() + 
   geom_sf(data = chicagoBoundary, fill = "black") +
@@ -96,12 +100,14 @@ ggplot() +
         plot.subtitle = element_text(size = 9,face = "italic"),
         plot.title = element_text(size = 12, face = "bold"),
         panel.background = element_blank(),
-        panel.border = element_rect(colour = "grey", fill=NA, size=0.8)
+        panel.border = element_rect(colour = "grey", fill=NA, linewidth =0.8)
         )
 
 ```
 
-```{r robbery density}
+The density map shows three clear robbery hotspots in Chicago. The most prominent hotspots are located in north east and north west part of Chicago, with some smaller hotspots in the southern part. 
+
+```{r robbery density, fig.width=5, message=FALSE, warning=FALSE, fig.align = 'center'}
 options(scipen=0)
 ggplot() + 
   geom_sf(data = chicagoBoundary, fill = "black") +
@@ -109,7 +115,7 @@ ggplot() +
                  aes(X, Y, fill = ..level.., alpha = ..level..),
                  size = 0.01, bins = 60, geom = 'polygon') +
   scale_fill_viridis(option = "magma", name = "Density") +
-  scale_alpha(range = c(0.00, 0.35), guide = FALSE) +
+  scale_alpha(range = c(0.00, 0.35), guide = "none") +
   labs(title = "Density of Robbery") +
   theme(axis.text.x=element_blank(),
         axis.text.y=element_blank(),
@@ -119,14 +125,14 @@ ggplot() +
         plot.subtitle = element_text(size = 9,face = "italic"),
         plot.title = element_text(size = 12, face = "bold"),
         panel.background = element_blank(),
-        panel.border = element_rect(colour = "grey", fill=NA, size=0.8)
+        panel.border = element_rect(colour = "grey", fill=NA, linewidth=0.8)
         )
 ```
 
+Since crime risk is not as a phenomenon that varies across administrative units, but one varying smoothly across the landscape, the best way to represent this spatial trend in a regression-ready form is to aggregate point-level data into a lattice of grid cells. The code below generates a fishnet of Chicago to achieve this goal. 
 
 
-
-```{r create fishnet}
+```{r create fishnet, fig.width=5, fig.align = 'center'}
 fishnet <- 
   st_make_grid(chicagoBoundary,
                cellsize = 500, 
@@ -146,13 +152,13 @@ ggplot() +
         plot.subtitle = element_text(size = 9,face = "italic"),
         plot.title = element_text(size = 12, face = "bold"),
         panel.background = element_blank(),
-        panel.border = element_rect(colour = "grey", fill=NA, size=0.8)
+        panel.border = element_rect(colour = "grey", fill=NA, linewidth=0.8)
         )
 ```
 
+After generating the fishnet, we used that as a spatial unit for visualizing robbery incidents, from which we may see that number of robberies are the highest in a couple of girds in northeast Chicago. This is where the clustered spatial process of robbery begins to take shape. 
 
-
-```{r join robbery to fishnet}
+```{r join robbery to fishnet, fig.align = 'center'}
 
 robbery21_net <- 
   dplyr::select(robbery21) %>% 
@@ -175,11 +181,13 @@ ggplot() +
         plot.subtitle = element_text(size = 9,face = "italic"),
         plot.title = element_text(size = 12, face = "bold"),
         panel.background = element_blank(),
-        panel.border = element_rect(colour = "grey", fill=NA, size=0.8)
+        panel.border = element_rect(colour = "grey", fill=NA, linewidth=0.8)
         )
 ```
 
-```{r distribution of robberies, message=FALSE, warning=FALSE}
+The figure below shows the distribution of robbery incidents in Chicago, which is non-normally distributed with a few grids having significantly higher number of robberies. To account for this non-normality, it is necessary to use Possion regression for this analysis. 
+
+```{r distribution of robberies, message=FALSE, warning=FALSE, fig.align = 'center'}
 ggplot(robbery21_net, aes(x = countRobbery)) +
   geom_histogram( fill="#56106E", color="#e9ecef") + 
   theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
@@ -196,9 +204,26 @@ ggplot(robbery21_net, aes(x = countRobbery)) +
   ylab("Count")
 ```
 
-
-
 # Risk Factors
+
+We included in our model eight different risk factors. This includes 311 reports of abandoned cars, street lights out, graffiti remediation, sanitation complaints,  abandon buildings, location of retail stores that sell liquor to go, location of shotspotter, and banks. Here are the rationale for including these predictors in the model. 
+
+**Abandoned Cars:** Neighborhoods with a high number of abandoned cars might indicate economic distress, lack of community engagement, and lower levels of surveillance. These conditions can create an environment conducive to criminal activities like robberies.
+
+**Street Lights Out:** Poorly lit areas are often targeted by criminals because darkness provides cover. Reports of street lights out can highlight areas with reduced visibility, making them potential hotspots for robberies.
+
+**Graffiti Presence**: Areas with frequent graffiti might suggest a lack of community maintenance and oversight. Such areas can be perceived as neglected, making them attractive for criminal activities, including robberies.
+
+**Sanitation Complaints:** Similarly, neighborhoods with sanitation issues might suggest the lack of maintenance. This breakdown in community can contribute to an environment where criminal activities, such as robberies, are more likely to occur.
+
+**Abandoned Buildings:** Abandoned buildings also serve as hideouts for criminals and can be perceived as unsafe by residents. They create a sense of disorder and can attract criminal elements, making nearby areas more susceptible to robberies.
+
+**Retail Stores Selling Liquor to Go:** Liquor stores are associated with alcohol consumption. Areas with a high concentration of liquor stores might indicate higher lead to higher alcohol related crime (though this is a very subjective statement) because inebriated individuals, particularly during late hours, might be more vulnerable and less aware of their surroundings, making them easy targets for robberies. 
+
+**Location of ShotSpotter:** ShotSpotter technology detects gunfire in real-time and areas with frequent gunshot incidents likely experience higher crime rates, including robberies. These locations can be considered as potential risk factors for predicting robbery incidents.
+
+**Banks:** Bank locations are often targeted due to the availability of cash. Since we are predicting robberies here, areas with a high density of banks might attract robbers seeking immediate financial gains.
+
 ```{r load predictor variables, warning=FALSE, message=FALSE}
 abandonCars <- 
   read.socrata("https://data.cityofchicago.org/Service-Requests/311-Service-Requests-Abandoned-Vehicles/3c9v-pnva") %>%
@@ -280,7 +305,7 @@ Banks <- Banks %>%
 
 ```
 
-
+All of these predictor variables were then joined to the fishnet. Each cell in the fishnet would now contain a number summarizing the number of respective risk factor occurrence in the cell.
 
 ```{r join predictor variables to fishnet, warning=FALSE, message=FALSE}
 
@@ -300,9 +325,9 @@ vars_net <-
 
 ```
 
+The figure below shows that each risk factor has its unique spatial distribution in Chicago. Abandoned buildings are concentrated mostly concentrated in southern Chicago. Banks and liquor retail stores are concentrated in the CBD. Abandoned cars, sanitation complaints, and streets lights out complaints are scattered everywhere in the city. Graffiti cleaning request are mostly found close to the city center while shot spotter are mostly outside of the city center. 
 
-
-```{r visualize predictor variables, fig.height=8, fig.width=11}
+```{r visualize predictor variables, fig.height=8, fig.width=11, fig.align = 'center'}
 vars_net.long <- 
   gather(vars_net, Variable, value, -geometry, -uniqueID)
 
@@ -440,7 +465,11 @@ wrap_plots(
 
 # Feature Engineering
 
+
 ## Nearest Distance
+
+The first feature engineering approach we took is to calculate average nearest neighbor distance to hypothesize a smoother exposure relationship across space. Here, the nn_function is used. For each of our risk factors, average nearest distance is calculated from the centroid of each cell to its nearest three, abandoned cars, for example. 
+
 ```{r calculate nearest distance, warning=FALSE, message=FALSE}
 
 st_c <- st_coordinates
@@ -470,8 +499,9 @@ vars_net <-
 
 ```
 
+The nearest neighbor features are then plotted below. Visualizing distance provides us with a better view of the spatial distribution of various risk factors. It appears that the southern and southwest part of Chicago are the furthest away from all kinds of risks. One interesting observation is that the northeastern corner of Chicago is the furthest away from shotspotters while being relatively close to all other kinds of risk factors. If shot spotter are used to location crime incidents, their absence in this area raises question of whether this "risk" factor act the same as others. Are shotspotter an indication of more crime in the area or does the presence of shot spotter means greater policing and therefore safter neighborhood? These questions are worth considering. 
 
-```{r visualize nearest distance, fig.height=8, fig.width=11}
+```{r visualize nearest distance, fig.height=8, fig.width=11, fig.align = 'center'}
 
 vars_net.long.nn <- 
   dplyr::select(vars_net, ends_with(".nn")) %>%
@@ -610,7 +640,10 @@ wrap_plots(
 
 ```
 
+
 ## Local Spatial Autocorrelation
+
+The second feature engineering approach we took is to account for the spatial process of robbery incidents through determining robbery hotspots in Chicago. Unlike the global Moran's I which would tell us if there's spatial autocorrelation of robberies of the entire area, local Moran's I examine if robbery count at a given location is randomly distributed relative to its immediate neighbors. A spatial weights matrix is calcualted below, which is used to relate a unit to its neighbors using queen contiguity (every grid cell is related to its eight adjacent neighbors). 
 
 ```{r calculate local moran I, message=FALSE, warning=FALSE}
 
@@ -632,8 +665,9 @@ final_net.localMorans <-
   gather(Variable, Value, -geometry)
 ```
 
+The results of the localmoran test is combined with the spatial layer for visualization. Several useful test statistics, including Moran's I, the p-value, and significant robbery hotspots are visualized. We may see that the Local Moran's I value is significantly higher in northeastern Chicago, close to the CBD area. Areas with low p-value suggests that there is spatial autocorrelation between robbery incidents in cells that are proximate to each other. Significant hotspots, meaning those grid cells with higher local counts than what might otherwise be expected under randomness (p-values <= 0.05), follows the same pattern as what's shown in the kernal density map above.  
 
-```{r visualize moran I, fig.height=8, fig.width=11}
+```{r visualize moran I, fig.height=8, fig.width=11, fig.align = 'center'}
 
 moran1 <- ggplot() +
   geom_sf(data = final_net.localMorans %>% filter(Variable == "Robbery_Count"), aes(fill=Value), colour=NA) +
@@ -696,13 +730,12 @@ moran4 <- ggplot() +
         panel.border = element_rect(colour = "grey", fill=NA, size=0.8)
         )
 
-wrap_plots(
-moran1, moran2, moran3, moran4, 
-  ncol = 4  
-)
+moran1 + moran2 + moran3 + moran4
 ```
 
 ## Singificant Robbery Clusters
+
+Following the calculation of significant robbery clusters, we created a dummy variable indicating whether this grid cell is located within the hotspot. We also calculated the distance from the centroid of each grid cell to its nearest robbery hotspot. 
 
 ```{r calculate significant robbery points, warning=FALSE, message=FALSE}
 
@@ -715,8 +748,9 @@ final_net <-
                                             filter(final_net, robbery.isSig == 1))), 1))
 ```
 
+The figure below visualizes distance to nearest robbery hotspots in Chicago, where the darker the color, the shorter the distance. 
 
-```{r visualize robbery NN Distance}
+```{r visualize robbery NN Distance, fig.align = 'center'}
 
 ggplot() +
       geom_sf(data = final_net, aes(fill=robbery.isSig.dist), colour=NA) +
@@ -735,9 +769,13 @@ ggplot() +
 
 
 ```
+
 ## All Risk Factors
 
-```{r correlation, fig.height=15, fig.width=8}
+The figure below organizes count and nearest neighbor (nn) correlations side-by-side. All of our count features are positively correlated with robbery incidents, meaning the greater number of risk factors, the higher number of robbery. The relationship is the strongest between robbery and sanitation complaint as well as shot spotter. All of our nearest neighbor features are negatively correlated with robbery incidents, meaning that the greater the distance, the less number of robbery. The relationship is the strongest for distance to signficant robbery clusters. While correlation for count features is a bit awkward, this approach can help with feature selection. For a given risk factor, we have to avoid colinearity by selecting either the count or nearest neighbor feature. In the case of our model, we used nearest distance. 
+
+
+```{r correlation, fig.height=15, fig.width=8, fig.align = 'center'}
 
 final_net_long <- final_net%>% 
   st_drop_geometry() %>% 
@@ -792,6 +830,9 @@ final_net_long %>%
 # Poisson Regression
 
 ## Random K-Fold CV
+
+Below, goodness of fit metrics are generated for four regressions - two including Just Risk Factors `reg.vars`, and a second `reg.ss.vars` includes risk factors plus the Local Moran’s I Spatial Process. Two kinds of cross validation test were performed. The first one uses a randomly generated `cvID` associated with each grid cell for random k-fold cross validation. 
+
 ```{r random k-fold regression, warning=FALSE, results='hide'}
 
 reg.vars <- c("Abandoned_Buildings.nn", "Abandoned_Cars.nn", "Graffiti.nn", 
@@ -818,8 +859,9 @@ reg.ss.cv <- crossValidate(
 
 ```
 
-
 ## Spatial LOGO CV
+
+The second one hold out one neighborhood, train the model on the remaining n-1 areas, predict for the hold out, and record the goodness of fit. This is also called the spatial 'Leave-one-group-out' cross-validation (LOGO-CV), in which each neighborhood takes a turn as a hold-out. The result of each analysis is a sf layer with observed and predicted burglary counts.
 
 ```{r spatial logo cv regression, warning=FALSE, message=FALSE, results='hide'}
 
@@ -851,6 +893,9 @@ reg.ss.spatialCV <- crossValidate(
 ```
 
 ## Error Analysis
+
+The code block below creates a long form reg.summary, that binds together observed/predicted counts and errors for each grid cell and for each regression. Residuals are calculated for each regression by subtracting the original robbery incidents from predicted incidents. 
+
 ```{r summarize regression}
 
 reg.summary <- 
@@ -869,16 +914,16 @@ reg.summary <-
     st_sf() 
 ```
 
+Comparing the error across different regressions, we see that adding spatial process features improve the model. In addition, the model appears slightly less robust for the spatial cross-validation, probably because LOGO-CV is such a conservative assumption. 
 
-```{r summarize errors by fold and regression}
+```{r summarize errors by fold and regression, message=FALSE, warning=FALSE}
 
 error_by_reg_and_fold <- 
   reg.summary %>%
     group_by(Regression, cvID) %>% 
     summarize(Mean_Error = mean(Prediction - countRobbery, na.rm = T),
               MAE = mean(abs(Mean_Error), na.rm = T),
-              SD_MAE = mean(abs(Mean_Error), na.rm = T)) %>%
-  ungroup()
+              SD_MAE = mean(abs(Mean_Error), na.rm = T)) %>% ungroup()
 
 st_drop_geometry(error_by_reg_and_fold) %>%
   group_by(Regression) %>% 
@@ -892,7 +937,9 @@ st_drop_geometry(error_by_reg_and_fold) %>%
 
 ```
 
-```{r visualize error,fig.height=8, fig.width=11}
+The small multiple maps below visualizes the distribution of errors by regression. For the random k-fold cv method, the errors are pretty evenly distributed across space. However, for spatial logo-cv method, higher errors occur at spatial hotspots. 
+
+```{r visualize error,fig.height=8, fig.width=11, fig.align = 'center'}
 
 error_by_reg_and_fold %>% 
   ggplot() +
@@ -917,6 +964,9 @@ error_by_reg_and_fold %>%
 # Prediction Accuracy 
 
 ## Generalizability Test
+
+Let’s now test for generalizability across racial-neighborhood context. To test this proposition, tidycensus is used to pull race data by census tract. Percentage minority population for each census tract is calculated by comparing the total number of Latinx, African American, and Asian population to the total population. Census tracts are split into two groups: majority white and minority, depending on whether the proportion of minority population in that census tract exceeds 60%. 
+
 
 ```{r download race data, message=FALSE, warning=FALSE, results='hide'}
 
@@ -946,8 +996,9 @@ tracts21 <-
 
 ```
 
+We may see that Chicago remains a very segregated city and there's clear racial boundary between places where more than 60% of the population are minority and places that's majority white. In particular, northern and northeastern (CBD) part of Chicago are majority white while the remaining parts are all made up of racial minorities. 
 
-```{r visualize race context}
+```{r visualize race context, fig.align = 'center'}
 
 ggplot() + geom_sf(data = na.omit(tracts21), aes(fill = majority), color = NA) +
     scale_fill_manual(values = c("#BB3754", "#56106E"), name="Race Context") +
@@ -964,8 +1015,7 @@ ggplot() + geom_sf(data = na.omit(tracts21), aes(fill = majority), color = NA) +
         ) 
 ```
 
-
-
+Error is calculated by subtracting the observed robbery count from the prediction. A positive difference represents an over-prediction. The least ideal result is a model that over-predicts risk in minority areas, and under-predicts in white areas. If reporting selection bias is an issue, such a model may unfairly allocate police resource disproportionately in black and brown communities. In our case, over-prediction of minorities is an issue for random k-fold cv regression, but not for logo-cv regressions. The latter two models under-predict minority neighborhoods and over-predict majority white neighborhood, making it looks like that this algorithms generalizes well with respect to race. 
 
 ```{r generalizability by race, message=FALSE, warning=FALSE}
 
@@ -995,7 +1045,9 @@ reg.summary %>%
 
 ## Kernel Desntiy Estimation
 
-```{r calculate 2021 Kernal Density}
+The utility of this algorithm is judged relative to an alternative police allocation method: kernel density estimation. Kernel density works by centering a smooth kernel, or curve, atop each crime point such that the curve is at its highest directly over the point and the lowest at the range of a circular search radius. The code block below creates a Kernel density map of robbery with a 1000 foot search radius. 
+ 
+```{r calculate 2021 Kernal Density, fig.width=6, message=FALSE, warning=FALSE, fig.align = 'center'}
 
 rob_ppp <- as.ppp(st_coordinates(robbery21), W = st_bbox(final_net))
 rob_KD.1000 <- spatstat.explore::density.ppp(rob_ppp, 1000)
@@ -1019,7 +1071,7 @@ ggplot(data=rob_KD.df, aes(x=x, y=y)) +
         )
 ```
 
-
+Next, a new goodness of fit indicator is created to illustrate whether the 2021 kernel density or risk predictions capture more of the 2022 robberies.
 
 ```{r download 2022 robery data, warning=FALSE, message=FALSE}
 
@@ -1038,6 +1090,7 @@ robbery22 <-
 
 ```
 
+The kernel density estimation was classified into 5 risk categories and the count for the 2022 robberies were summarized into the same sf layer.  The purpose here is to see if the risk predictions capture more observed burglaries than the kernel density. If so, then the risk prediction model provides a more robust targeting tool for allocating police resources. 
 
 ```{r categorize KDE}
 
@@ -1065,6 +1118,7 @@ rob_KDE_sf <- rob_KDE_sum %>%
 
 ```
 
+The same process was repeated for the risk prediction. Note that both predictions from the LOGO-CV with and without the spatial features is being used here.
 
 ```{r categorize random k fold}
 
@@ -1086,10 +1140,6 @@ rob_risk_sf <-
       mutate(robberyCount = replace_na(robberyCount, 0))) %>%
   dplyr::select(label,Risk_Category, robberyCount)
 
-```
-
-
-```{r categorize spatial logo}
 ml_breaks_simple <- classIntervals(reg.ss.cv$Prediction, 
                              n = 5, "fisher")
 rob_risk_sf_simple <-
@@ -1107,11 +1157,14 @@ rob_risk_sf_simple <-
       dplyr::select(robbery21) %>% mutate(robberyCount = 1), ., sum) %>%
       mutate(robberyCount = replace_na(robberyCount, 0))) %>%
   dplyr::select(label,Risk_Category, robberyCount)
+
 ```
 
 ## Prediction Comparison
 
-```{r prediction comparisons map}
+Below a map is generated of the risk categories for all three model types. A strongly fit model should show that the highest risk category is uniquely targeted to places with a high density of burglary points. The map shows that our risk prediction models perform as good as the kernal density approach in capturing the distribution of robbery incidents. 
+
+```{r prediction comparisons map, fig.align = 'center'}
 rbind(rob_KDE_sf, rob_risk_sf, rob_risk_sf_simple) %>%
   na.omit() %>%
   gather(Variable, Value, -label, -Risk_Category, -geometry) %>%
@@ -1119,8 +1172,9 @@ rbind(rob_KDE_sf, rob_risk_sf, rob_risk_sf_simple) %>%
     geom_sf(aes(fill = Risk_Category), colour = NA) +
     facet_wrap(~label, ) +
     scale_fill_viridis(option = "magma", discrete = TRUE, name = "Risk Category") +
+      geom_sf(data = sample_n(robbery22, 3000), size = .03, colour = "white") +
     labs(title="Comparison of Kernel Density and Risk Predictions",
-         subtitle="2021 robbery risk predictions; 2018 robberies") + 
+         subtitle="2021 robbery risk predictions; 2022 robberies") + 
   theme(axis.text.x=element_blank(),
         axis.text.y=element_blank(),
         axis.ticks =element_blank(),
@@ -1132,9 +1186,10 @@ rbind(rob_KDE_sf, rob_risk_sf, rob_risk_sf_simple) %>%
         panel.border = element_rect(colour = "grey", fill=NA, size=0.8)
         )
 ```
-A well fit model should show that the risk predictions capture a greater share of 2018 burglaries in the highest risk category relative to the Kernel density.
 
-```{r prediction comparisons figure}
+A more straightforward way to compare the accuracy of prediction is through histogram. A well fit model should show that the risk predictions capture a greater share of 2022 robberies in the highest risk category relative to the Kernel density. Unfortunately, the kernel density model edges out both risk prediction model for highest risk areas. Nevertheless, the risk prediction model does a better job in capturing robbery incidents in lower-risk areas that the kernel density model had ignored. 
+
+```{r prediction comparisons figure, warning=FALSE, message=FALSE, fig.align = 'center'}
 rbind(rob_KDE_sf, rob_risk_sf, rob_risk_sf_simple) %>%
   st_drop_geometry() %>%
   na.omit() %>%
@@ -1148,18 +1203,18 @@ rbind(rob_KDE_sf, rob_risk_sf, rob_risk_sf_simple) %>%
       geom_bar(aes(fill=label), position="dodge", stat="identity") +
       scale_fill_viridis(option = "magma", discrete = TRUE, name = "Model", direction = -1) +
       labs(title = "Risk Prediction vs. Kernel Density",
-           y = "% of Test Set Burglaries (per model)",
+           y = "% of Test Set Robberies (per model)",
            x = "Risk Category") +
   theme_bw() +
       theme(axis.text.x = element_text(angle = 45, vjust = 0.5))
 ```
 
+# Conclusions
 
+In conclusion, there are still a lot of work that needs to be done before this model could be put into practice. Comparing to the traditional methodology of using kernel density to estimate crime locations, our model did not do very well in capturing robbery incidents in areas designated as the highest risk category. There are two main reasons behind. Firstly, most predictor variables we used in our model are out of date. While the Chicago Data Portal has been constantly updating its crime dataset, almost all of the risk factor dataset we used were last updated in 2019. That said, we are using reports of abandoned cars, graffiti, abandoned buildings, street light incidents, sanitation complaints, etc., from 2019 to fit a model that summarize robberies in 2021, which is then subsequently used to predict robberies in 2022. If there’s a correlation between locations of these risk factors and robbery incidents, then the removals of graffiti and renovations of abandoned buildings in 2021, for example, would very much likely to shift the geographies of robbery incidents. For a better prediction, we highly encourage the release of risk factor datasets that are up to date. 
 
+In addition, we believe that the global pandemic since 2020 would have had a significant impact on locations of robberies. Economic distress, driven by high unemployment rates, could create financial strain, leading to an increase in robberies in areas already facing economic challenges. Lockdowns and changed routines due to social distancing measures could also create opportunities for criminals. In addition, the reallocation of police resources to enforce public health measures would result in decreased police presence in areas that were regularly patrolled. All of these would contribute to a growing number of robbery incidents in area unexpected before. If we sticked with a more general model to predict robbery incidents during this very unusual time, then it is very likely that our model produces skewed results. This reminds us again the importance of ensuring the generalizability of any machine learning model not only across space but also time. In this case, the model should consider risk factors related to the pandemic. 
 
+Nevertheless, our model did a better job in capturing robbery incidents in lower-risk areas that the kernel density model had ignored. While being low risk, it is also important not to overlook potential robbery incidents in these areas. Ignoring the “risk” of low-risk area and overly emphasizing high risk areas would lead to over-policing in high-risk areas, which would continue to remain as high risk ever after. This leads us to think about whether using a single model is not enough to capture the complexities of robbery incidents in one place. A collective approach that strategically make use of the result of both the kernel density estimation and the risk prediction models can probably lead to more accurate predictions. 
 
-
-
-
-
-
+On top of that, we have avoided the overprediction of robbery incidents in majority non-white neighborhood. Yet, despite finding that the model generalizes well across different neighborhood contexts, we cannot be sure the model doesn’t suffer from selection bias. If law enforcement systematically over-polices certain communities, and this selection criteria goes unaccounted for in the model, then the model may be still biased regardless of the above tests. We also found that adding spatial process features improve the model and using the random k-fold cross validation method would enhance the model. 
